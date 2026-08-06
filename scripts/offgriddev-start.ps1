@@ -538,7 +538,7 @@ if ($FailedChatModelLabels.Count -gt 0) {
     foreach ($ModelLabel in $FailedChatModelLabels) { Write-Host "  - $ModelLabel" }
 }
 Write-Host ""
-Write-Host "#NoTokens"
+Write-Host "#InfiniteTokens"
 Write-Host ""
 Read-Host "Press Enter to exit"
 

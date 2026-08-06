@@ -387,3 +387,6 @@ if [ "${#FAILED_CHAT_MODEL_LABELS[@]}" -gt 0 ]; then
     echo "  - ${MODEL_LABEL}"
   done
 fi
+echo ""
+echo "#InfiniteTokens"
+echo ""
