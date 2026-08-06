@@ -23,6 +23,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>.
 ![Eisenberg Family Depression Center](https://code.depressioncenter.org/images/EFDCLogo_375w.png "depressioncenter.org")
 
 # OffgridDev™
+​​​​​​​     _**#InfiniteTokens**_
+
 
 ## Description
 **OffgridDev**™ is a local, offline-first AI development environment for developers and researchers who want serious AI assistance **without the cloud, tokens, or subscriptions**.
