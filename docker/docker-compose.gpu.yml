@@ -1,0 +1,27 @@
+# This file is part of OffgridDev
+# docker-compose.gpu.yml
+# Author(s): Gabriel Mongefranco
+# Created: 2026-04-23
+# Last Modified: 2026-08-06
+# Summary: Optional Compose override that requests NVIDIA GPU passthrough for the
+#   ollama service. Merged on top of docker-compose.yml only by launcher scripts
+#   that detect a usable NVIDIA GPU, so the base file keeps working CPU-only.
+#   Requests every NVIDIA GPU present (count: all) so Ollama can split large
+#   models across multiple cards on multi-GPU machines.
+# Notes: See README file for documentation and full license information.
+#
+# Copyright © 2026 The Regents of the University of Michigan
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License v3.0 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0-standalone.html>.
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

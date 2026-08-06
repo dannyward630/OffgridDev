@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-# This file is part of < PROJECT NAME >.
+# This file is part of OffgridDev.
 # CITATION.cff
 # Copyright © 2026 The Regents of the University of Michigan
 #
@@ -13,21 +13,13 @@ cff-version: 1.2.0
 # You should have received a copy of the GNU General Public License along
 # with this program. If not, see https://www.gnu.org/licenses/.
 type: software
-title: "[repository_name_or_marketing_title]"
-doi: "[10.5281/zenodo.PARENT_DOI]" # Use your version-agnostic DOI here
-url: "https://github.com/DepressionCenter/[repository_name]" # project website or repository URL
-repository-code: "https://github.com/DepressionCenter/[repository_name]"
+title: "OffgridDev"
+# doi: "[10.5281/zenodo.PARENT_DOI]" # Use your version-agnostic DOI here - not yet minted, fill in once a Zenodo release exists
+url: "https://github.com/DepressionCenter/OffgridDev" # project website or repository URL
+repository-code: "https://github.com/DepressionCenter/OffgridDev"
 license: "gpl-3.0-or-later"
 authors:
   - family-names: "Mongefranco"
     given-names: "Gabriel"
     orcid: "https://orcid.org/0000-0001-7289-200X"
-    affiliation: "University of Michigan"
-  - family-names: "[Family_Name]"
-    given-names: "[Given_Name]"
-    orcid: "https://orcid.org/0000-000X-XXXX-XXXX"
-    affiliation: "University of Michigan"
-  - family-names: "[Family_Name]"
-    given-names: "[Given_Name]"
-    orcid: "https://orcid.org/0000-000X-XXXX-XXXX"
     affiliation: "University of Michigan"

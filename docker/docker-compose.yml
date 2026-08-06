@@ -1,0 +1,65 @@
+# This file is part of OffgridDev
+# docker-compose.yml
+# Author(s): Gabriel Mongefranco
+# Created: 2026-08-06
+# Last Modified: 2026-08-06
+# Summary: Base Compose file defining the Ollama and Open WebUI services that make up the
+#   OffgridDev stack. Runs CPU-only by itself; docker-compose.gpu.yml layers NVIDIA GPU
+#   passthrough on top when the launcher scripts detect a usable GPU.
+# Notes: See README file for documentation and full license information.
+#
+# Copyright © 2026 The Regents of the University of Michigan
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License v3.0 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0-standalone.html>.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: offgriddev-ollama
+    ports: ['11434:11434']
+    environment:
+      # Caps concurrent requests to 1 so a second request can't launch a second model
+      # load on top of an already-resident one and exhaust GPU/CPU memory.
+      - OLLAMA_NUM_PARALLEL=1
+    volumes:
+      - ../data/ollama:/root/.ollama
+    restart: unless-stopped
+
+  webui:
+    image: ghcr.io/open-webui/open-webui:latest
+    container_name: offgriddev-webui
+    depends_on: [ollama]
+    ports: ['3000:8080']
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      # Skips Open WebUI's login screen entirely (single implicit local user, no
+      # password). Safe here because the port is only published to localhost - see
+      # the "Login" note under Web Interface in the README before changing that.
+      - WEBUI_AUTH=False
+      # By default Open WebUI computes RAG embeddings with a local sentence-transformers
+      # model (all-MiniLM-L6-v2) that it fetches from huggingface.co - on first boot, and
+      # again on every boot afterward to re-validate the cached copy, per open-webui's own
+      # air-gapped deployment guidance (docs.openwebui.com/troubleshooting/rag/). Pointing
+      # the embedding engine at Ollama instead means it never talks to Hugging Face at
+      # all: nomic-embed-text (~274MB) is pulled once into Ollama by the startup scripts,
+      # same as any chat model, and reused from there over the existing ollama:11434
+      # connection above - no separate network path, nothing to re-validate.
+      - RAG_EMBEDDING_ENGINE=ollama
+      - RAG_EMBEDDING_MODEL=nomic-embed-text
+      # Belt-and-suspenders: blocks Hugging Face network calls outright in case any other
+      # Open WebUI feature ever tries to reach huggingface.co for a model.
+      - HF_HUB_OFFLINE=1
+      # ENABLE_SUBAGENTS is deliberately NOT set here (left at Open WebUI's own default,
+      # off). Turning it on globally auto-enables the Sub-agents Builtin Tool for every
+      # model, including ones that don't support Ollama tool calling at all - DeepSeek
+      # Coder and Gemma 3 (two of this project's four supported families) fail every
+      # request outright with "does not support tools" once that happens, with no
+      # compose-level way to exclude just those models. If you want sub-agents for the
+      # tool-capable models (Qwen 2.5 Coder, Qwen 3 Coder, Devstral), enable it here and
+      # then manually turn Sub-agents back OFF per non-tool-capable model in Workspace →
+      # Models → Edit → Builtin Tools - see the README's Sub-agents section.
+    volumes:
+      - ../data/open-webui:/app/backend/data
+    restart: unless-stopped

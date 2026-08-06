@@ -52,3 +52,31 @@ CHATGPT.md
 *.cache
 __pycache__/
 .venv/
+
+# Ignore OffgridDev runtime data - downloaded models, generated keys, local databases,
+# and caches. The launcher scripts (scripts/offgriddev.ps1, .sh) recreate this directory
+# automatically; never commit it. It currently holds multi-GB Ollama model blobs, an
+# SSH keypair Ollama generates for registry auth (data/ollama/id_ed25519*), and Open
+# WebUI's local user/chat SQLite database (data/open-webui/webui.db*) - all sensitive
+# and/or regenerable, never something to check in.
+data/
+
+# Ignore local secrets and credential files
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+*credentials*.json
+
+# Ignore temp/scratch files
+*.tmp
+*.temp
+*.bak
+*.orig
