@@ -98,6 +98,11 @@ The chat model selector (top of the page) lists whatever models are currently pu
 default, that's exactly the set you enabled in `config/models.env`, since VRAM gating already kept it to
 models this machine can run. Switching is instant; nothing downloads at that point.
 
+Models pulled through the startup scripts show their friendly alias name (e.g. `deepseek-r1:medium-reasoning`
+instead of `deepseek-r1:7b`) — see [Model Naming](hardware-and-model-configuration.md#model-naming). Models
+pulled manually via the Admin Panel (below) still show their raw Ollama tag, since they never go through the
+alias step.
+
 ### Pulling additional models from the browser
 You don't need the CLI to add a model later. Go to **Settings → Admin Panel → Settings → Connections →
 Ollama**, enter a model tag (e.g. `qwen2.5-coder:14b`), and pull it from there — it appears in the chat
@@ -116,10 +121,10 @@ already-pulled base models but doesn't change the pull/VRAM behavior above.
 Open WebUI has a "Sub-agents" feature (a chat model hands off a focused piece of a task to a second
 background model call, then uses the result to keep going) — **off by default in this project**, matching
 Open WebUI's own default. It stays off deliberately: turning it on globally (`ENABLE_SUBAGENTS=True`)
-auto-enables the Sub-agents Builtin Tool for *every* model, and DeepSeek Coder and Gemma 3 — two of this
-project's four supported families — don't support Ollama tool calling at all. Every request to one of those
-models then fails outright with `does not support tools`, and there's no compose-level way to exclude just
-those models from the global flag. (See
+auto-enables the Sub-agents Builtin Tool for *every* model, and several of this project's model families —
+DeepSeek Coder, Gemma 3, Phi (reasoning), and both vision models — don't support Ollama tool calling at all.
+Every request to one of those models then fails outright with `does not support tools`, and there's no
+compose-level way to exclude just those models from the global flag. (See
 [Tools errors on DeepSeek Coder / Gemma 3](troubleshooting.md#tools-errors-on-deepseek-coder--gemma-3) for
 why this same failure can happen even with Sub-agents off, and how it's handled.)
 
@@ -149,12 +154,21 @@ startup scripts, so they're unaffected either way.
 
 The startup script writes:
 ```
-C:\Users\<you>\.continue\config.yaml
+C:\Users\<you>\.continue\config.yaml     (Windows)
+~/.continue/config.yaml                  (macOS/Linux)
 ```
+
+One named entry is generated per model that pulled successfully this run — friendly name, alias tag, and a
+task-appropriate role set (coding models get the full `chat`/`edit`/`apply`/`autocomplete`/`rerank` set;
+reasoning models get `chat`/`edit`/`apply`; Gemma (general) gets `chat`/`edit`; vision models get `chat`
+only) — plus a trailing **OffgridDev Autodetect** entry that still picks up anything pulled out-of-band
+through Open WebUI's manual-pull UI (see [Pulling additional models from the
+browser](#pulling-additional-models-from-the-browser)), since those never go through the alias step.
 
 Then:
 1. Restart VS Code
-2. Continue → Select Model → OffgridDev Autodetect
+2. Continue → Select Model → pick the named model you want (e.g. **Qwen 2.5 Coder 7B**), or
+   **OffgridDev Autodetect** to see everything currently pulled into Ollama
 
 ---
 

@@ -24,6 +24,11 @@
 
 $ErrorActionPreference = "Stop"
 
+# Suppresses the Docker CLI's post-command "What's next: Try Docker Debug..." tips, which
+# otherwise print after every `docker exec`/`docker compose` call below and bury the
+# script's own progress output under noise unrelated to this project.
+$env:DOCKER_CLI_HINTS = "false"
+
 $Root = Resolve-Path "$PSScriptRoot\.."
 $Config = Join-Path $Root "config\models.env"
 
@@ -218,40 +223,13 @@ Get-Content $Config | ForEach-Object {
 # --------------------------------------------------
 # Enforce sane model selection by VRAM
 # --------------------------------------------------
-
-if ($VramMb -lt 6000) {
-    if ($ENABLE_QWEN25_CODER_0P5B -ne "1" -and $ENABLE_QWEN25_CODER_1P5B -ne "1" -and
-        $ENABLE_QWEN25_CODER_3B -ne "1" -and $ENABLE_QWEN25_CODER_7B -ne "1") {
-        Fail "GPU has $VramMb MB VRAM. Enable a Qwen 2.5 Coder 0.5B/1.5B/3B/7B model in models.env."
-    }
-    if ($ENABLE_QWEN25_CODER_14B -eq "1") {
-        Fail "14B models require ~10 GB VRAM. Your GPU has $VramMb MB."
-    }
-    if ($ENABLE_QWEN25_CODER_32B -eq "1") {
-        Fail "32B models require ~20 GB VRAM. Your GPU has $VramMb MB."
-    }
-    if ($ENABLE_GEMMA4_E4B -eq "1") {
-        Fail "Gemma4 E4B requires ~6-8 GB VRAM. Your GPU has $VramMb MB."
-    }
-}
-
-if ($VramMb -lt 12000) {
-    if ($ENABLE_QWEN25_CODER_32B -eq "1") {
-        Fail "32B models require ~20 GB VRAM. Your GPU has $VramMb MB."
-    }
-    if ($ENABLE_QWEN3_CODER_30B -eq "1") {
-        Fail "Qwen3 Coder 30B requires ~20 GB VRAM. Your GPU has $VramMb MB."
-    }
-    if ($ENABLE_DEVSTRAL_24B -eq "1") {
-        Fail "Devstral 24B requires ~16 GB VRAM. Your GPU has $VramMb MB."
-    }
-    if ($ENABLE_DEEPSEEK_CODER_33B -eq "1") {
-        Fail "DeepSeek 33B requires ~20 GB VRAM. Your GPU has $VramMb MB."
-    }
-    if ($ENABLE_GEMMA4_26B_A4B -eq "1") {
-        Fail "Gemma4 26B A4B requires ~10-12 GB VRAM. Your GPU has $VramMb MB."
-    }
-}
+# This used to be a hard preflight Fail()/exit here, before Docker even started - one
+# oversized enabled model killed the whole run even if every other enabled model would've
+# fit fine. VRAM fit is now checked per model at pull time instead (see Pull-Model's
+# -MinVramMb below): an out-of-budget model is skipped with a WARNING and folded into the
+# same $ChatModelsRequested/$ChatModelsPulled counters a failed pull already uses. The run
+# only stops with an error if nothing enabled ends up runnable - see the check right after
+# the pull list below.
 
 # --------------------------------------------------
 # Start containers (GPU override attached only if a GPU was detected)
@@ -279,18 +257,27 @@ if ($VramMb -gt 0) {
 # A GPU can be correctly detected and passed through to the container and Ollama will
 # still silently fall back to CPU if the host's NVIDIA driver is older than the CUDA
 # build this Ollama image needs - there's no error, just a much slower model that looks
-# identical from the outside. Ollama logs this at startup, so check for it here instead
-# of leaving the user to notice only because everything feels slow.
+# identical from the outside. Ollama logs this a few seconds into container startup
+# (during its GPU discovery phase), so this polls for up to 10 seconds instead of taking
+# one snapshot immediately - a single fixed sleep intermittently missed the log line
+# entirely on slower first-boot startups, silently skipping this warning.
 if ($VramMb -gt 0) {
-    Start-Sleep -Seconds 2
-    $OllamaStartupLogs = (& $Docker logs offgriddev-ollama) -join "`n"
-    if ($OllamaStartupLogs -match 'NVIDIA driver too old"\s+device="([^"]+)"[^\n]*required_driver="([^"]+)"') {
-        Write-Host ""
-        Write-Host "WARNING: GPU detected ($($Matches[1])), but its NVIDIA driver is too old for this"
-        Write-Host "  Ollama build (needs driver $($Matches[2])). Falling back to CPU - models will work"
-        Write-Host "  but run much slower. Update the driver from https://www.nvidia.com/drivers, then"
-        Write-Host "  re-run this script."
-        Write-Host ""
+    $DriverCheckElapsed = 0
+    $DriverCheckInterval = 1
+    $DriverCheckTimeout = 10
+    while ($DriverCheckElapsed -lt $DriverCheckTimeout) {
+        Start-Sleep -Seconds $DriverCheckInterval
+        $DriverCheckElapsed += $DriverCheckInterval
+        $OllamaStartupLogs = (& $Docker logs offgriddev-ollama) -join "`n"
+        if ($OllamaStartupLogs -match 'NVIDIA driver too old"\s+device="([^"]+)"[^\n]*required_driver="([^"]+)"') {
+            Write-Host ""
+            Write-Host "WARNING: GPU detected ($($Matches[1])), but its NVIDIA driver is too old for this"
+            Write-Host "  Ollama build (needs driver $($Matches[2])). Falling back to CPU - models will work"
+            Write-Host "  but run much slower. Update the driver from https://www.nvidia.com/drivers, then"
+            Write-Host "  re-run this script."
+            Write-Host ""
+            break
+        }
     }
 }
 
@@ -310,17 +297,66 @@ $script:ChatModelsRequested = 0
 $script:ChatModelsPulled = 0
 $script:PulledChatModelLabels = @()
 $script:FailedChatModelLabels = @()
+# One entry per successfully pulled-and-aliased chat model, consumed below to generate
+# Continue's config.yaml with explicit per-model entries instead of AUTODETECT-only.
+$script:PulledModelEntries = @()
 
-function Pull-Model($model, $label, [bool]$IsChatModel = $true) {
+# Continue role sets by task, per this project's naming scheme (family-version:size-task):
+# coding models keep the full role set Continue supports; reasoning models skip
+# autocomplete/rerank (not meaningfully used in a reasoning workflow); Gemma (general) is
+# chat/edit only; vision models are chat-only (no code-editing signal in an image).
+$CodingRoles = @("chat", "edit", "apply", "autocomplete", "rerank")
+$ReasoningRoles = @("chat", "edit", "apply")
+$GeneralRoles = @("chat", "edit")
+$VisionRoles = @("chat")
+
+function Pull-Model($model, $label, [bool]$IsChatModel = $true, [string]$Alias = $null, [string[]]$Roles = @(), [int]$MinVramMb = 0) {
     if ($IsChatModel) { $script:ChatModelsRequested++ }
+    # Per-model VRAM fit check, replacing the old preflight Fail()/exit: an enabled model
+    # that doesn't fit this GPU is skipped (not downloaded) and reported the same way a
+    # failed pull is, rather than killing the whole run before it starts. $MinVramMb of 0
+    # means "no minimum" (small/medium models this project has never gated).
+    if ($MinVramMb -gt 0 -and $VramMb -lt $MinVramMb) {
+        Write-Host ""
+        Write-Host "WARNING: Skipping $label ($model) - needs ~$([math]::Round($MinVramMb / 1000)) GB VRAM, this GPU has $VramMb MB. Not pulling it. Disable its ENABLE_* flag in models.env to silence this warning."
+        Write-Host ""
+        if ($IsChatModel) { $script:FailedChatModelLabels += $label }
+        return
+    }
     try {
         & $Docker exec -it offgriddev-ollama ollama pull $model
         if ($LASTEXITCODE -ne 0) {
             throw "ollama pull exited with code $LASTEXITCODE"
         }
+
+        $FinalTag = $model
+        if ($Alias) {
+            # Renaming the Ollama tag itself (not an Open WebUI-only rename) is the only
+            # mechanism visible to Continue's AUTODETECT scan and to FieldStationAI, both of
+            # which read Ollama's /api/tags verbatim. `ollama cp` shares blobs (zero extra
+            # disk); the `ollama rm` of the raw tag below is safe/refcounted - it only drops
+            # the tag, never a blob the new alias still references.
+            & $Docker exec -it offgriddev-ollama ollama cp $model $Alias
+            if ($LASTEXITCODE -ne 0) {
+                # `ollama cp` fails if the alias already exists - expected on a repeat run
+                # of this script, not a real error. Confirm the alias is actually there
+                # before treating this as success rather than assuming every cp failure is
+                # the harmless idempotent case.
+                & $Docker exec -it offgriddev-ollama ollama show $Alias *> $null
+                if ($LASTEXITCODE -ne 0) {
+                    throw "ollama cp $model -> $Alias failed and $Alias does not already exist"
+                }
+            }
+            & $Docker exec -it offgriddev-ollama ollama rm $model *> $null
+            $FinalTag = $Alias
+        }
+
         if ($IsChatModel) {
             $script:ChatModelsPulled++
             $script:PulledChatModelLabels += $label
+            if ($Alias) {
+                $script:PulledModelEntries += @{ name = $label; model = $FinalTag; roles = $Roles }
+            }
         }
     } catch {
         Write-Host ""
@@ -337,66 +373,120 @@ function Pull-Model($model, $label, [bool]$IsChatModel = $true) {
 # Open WebUI's first request for it - not a user-selectable chat model, so it's not
 # gated behind an ENABLE_ flag in models.env, and its failure doesn't count against the
 # "at least one chat model must succeed" check below (RAG degrades; chat still works).
+# Left unaliased: docker-compose.yml's RAG_EMBEDDING_MODEL env var references this raw tag
+# directly, and it's never chat-selectable, so aliasing it has no user-facing benefit.
 Pull-Model "nomic-embed-text" "Nomic Embed Text (RAG embedding model)" $false
 
 if ($ENABLE_QWEN25_CODER_0P5B -eq 1) {
-    Pull-Model "qwen2.5-coder:0.5b" "Qwen 2.5 Coder 0.5B"
+    Pull-Model "qwen2.5-coder:0.5b" "Qwen 2.5 Coder 0.5B" -Alias "qwen25-coder:small-05b-coding" -Roles $CodingRoles
 }
 
 if ($ENABLE_QWEN25_CODER_1P5B -eq 1) {
-    Pull-Model "qwen2.5-coder:1.5b" "Qwen 2.5 Coder 1.5B"
+    Pull-Model "qwen2.5-coder:1.5b" "Qwen 2.5 Coder 1.5B" -Alias "qwen25-coder:small-15b-coding" -Roles $CodingRoles
 }
 
 if ($ENABLE_QWEN25_CODER_3B -eq 1) {
-    Pull-Model "qwen2.5-coder:3b" "Qwen 2.5 Coder 3B"
+    Pull-Model "qwen2.5-coder:3b" "Qwen 2.5 Coder 3B" -Alias "qwen25-coder:small-3b-coding" -Roles $CodingRoles
 }
 
 if ($ENABLE_QWEN25_CODER_7B -eq 1) {
-    Pull-Model "qwen2.5-coder:7b" "Qwen 2.5 Coder 7B"
+    Pull-Model "qwen2.5-coder:7b" "Qwen 2.5 Coder 7B" -Alias "qwen25-coder:medium-coding" -Roles $CodingRoles -MinVramMb 6000
 }
 
 if ($ENABLE_QWEN25_CODER_14B -eq 1) {
-    Pull-Model "qwen2.5-coder:14b" "Qwen 2.5 Coder 14B"
+    Pull-Model "qwen2.5-coder:14b" "Qwen 2.5 Coder 14B" -Alias "qwen25-coder:large-coding" -Roles $CodingRoles -MinVramMb 6000
 }
 
 if ($ENABLE_QWEN25_CODER_32B -eq 1) {
-    Pull-Model "qwen2.5-coder:32b" "Qwen 2.5 Coder 32B"
+    Pull-Model "qwen2.5-coder:32b" "Qwen 2.5 Coder 32B" -Alias "qwen25-coder:xlarge-coding" -Roles $CodingRoles -MinVramMb 12000
 }
 
 if ($ENABLE_QWEN3_CODER_30B -eq 1) {
-    Pull-Model "qwen3-coder:30b" "Qwen3 Coder 30B"
+    Pull-Model "qwen3-coder:30b" "Qwen3 Coder 30B" -Alias "qwen3-coder:xlarge-coding" -Roles $CodingRoles -MinVramMb 12000
 }
 
 if ($ENABLE_DEVSTRAL_24B -eq 1) {
-    Pull-Model "devstral:24b" "Devstral 24B"
+    Pull-Model "devstral:24b" "Devstral 24B" -Alias "devstral:xlarge-coding" -Roles $CodingRoles -MinVramMb 12000
 }
 
 if ($ENABLE_DEEPSEEK_CODER_1P3B -eq 1) {
-    Pull-Model "deepseek-coder:1.3b" "DeepSeek Coder 1.3B"
+    Pull-Model "deepseek-coder:1.3b" "DeepSeek Coder 1.3B" -Alias "deepseek-coder:small-coding" -Roles $CodingRoles
 }
 
 if ($ENABLE_DEEPSEEK_CODER_6P7B -eq 1) {
-    Pull-Model "deepseek-coder:6.7b" "DeepSeek Coder 6.7B"
+    Pull-Model "deepseek-coder:6.7b" "DeepSeek Coder 6.7B" -Alias "deepseek-coder:medium-coding" -Roles $CodingRoles -MinVramMb 6000
 }
 
 if ($ENABLE_DEEPSEEK_CODER_33B -eq 1) {
-    Pull-Model "deepseek-coder:33b" "DeepSeek Coder 33B"
+    Pull-Model "deepseek-coder:33b" "DeepSeek Coder 33B" -Alias "deepseek-coder:xlarge-coding" -Roles $CodingRoles -MinVramMb 12000
 }
 
-if ($ENABLE_GEMMA3_2B -eq 1) {
-    Pull-Model "gemma3:2b" "Gemma 3 2B"
+if ($ENABLE_GEMMA3_1B -eq 1) {
+    Pull-Model "gemma3:1b" "Gemma 3 1B" -Alias "gemma3:small-general" -Roles $GeneralRoles
 }
 
-if ($ENABLE_GEMMA3_7B -eq 1) {
-    Pull-Model "gemma3:7b" "Gemma 3 7B"
+if ($ENABLE_GEMMA3_4B -eq 1) {
+    Pull-Model "gemma3:4b" "Gemma 3 4B" -Alias "gemma3:medium-general" -Roles $GeneralRoles
 }
 
 if ($ENABLE_GEMMA4_E4B -eq 1) {
-    Pull-Model "gemma4:e4b" "Gemma 4 E4B"
+    Pull-Model "gemma4:e4b" "Gemma 4 E4B" -Alias "gemma4:medium-general" -Roles $GeneralRoles -MinVramMb 6000
 }
 
 if ($ENABLE_GEMMA4_26B_A4B -eq 1) {
-    Pull-Model "gemma4:26b-a4b" "Gemma 4"
+    Pull-Model "gemma4:26b-a4b" "Gemma 4" -Alias "gemma4:large-general" -Roles $GeneralRoles -MinVramMb 12000
+}
+
+if ($ENABLE_DEEPSEEK_R1_7B -eq 1) {
+    Pull-Model "deepseek-r1:7b" "DeepSeek-R1 7B" -Alias "deepseek-r1:medium-reasoning" -Roles $ReasoningRoles -MinVramMb 6000
+}
+
+if ($ENABLE_DEEPSEEK_R1_14B -eq 1) {
+    Pull-Model "deepseek-r1:14b" "DeepSeek-R1 14B" -Alias "deepseek-r1:large-reasoning" -Roles $ReasoningRoles -MinVramMb 6000
+}
+
+if ($ENABLE_DEEPSEEK_R1_32B -eq 1) {
+    Pull-Model "deepseek-r1:32b" "DeepSeek-R1 32B" -Alias "deepseek-r1:xlarge-reasoning" -Roles $ReasoningRoles -MinVramMb 12000
+}
+
+if ($ENABLE_QWEN3_8B -eq 1) {
+    Pull-Model "qwen3:8b" "Qwen3 8B" -Alias "qwen3:medium-reasoning" -Roles $ReasoningRoles -MinVramMb 6000
+}
+
+if ($ENABLE_QWEN3_14B -eq 1) {
+    Pull-Model "qwen3:14b" "Qwen3 14B" -Alias "qwen3:large-reasoning" -Roles $ReasoningRoles -MinVramMb 6000
+}
+
+if ($ENABLE_QWEN3_30B_A3B -eq 1) {
+    Pull-Model "qwen3:30b-a3b" "Qwen3 30B A3B" -Alias "qwen3:xlarge-reasoning" -Roles $ReasoningRoles -MinVramMb 12000
+}
+
+if ($ENABLE_QWQ_32B -eq 1) {
+    Pull-Model "qwq:32b" "QwQ 32B" -Alias "qwq:xlarge-reasoning" -Roles $ReasoningRoles -MinVramMb 12000
+}
+
+if ($ENABLE_HERMES3_3B -eq 1) {
+    Pull-Model "hermes3:3b" "Hermes 3 3B" -Alias "hermes3:small-reasoning" -Roles $ReasoningRoles
+}
+
+if ($ENABLE_HERMES3_8B -eq 1) {
+    Pull-Model "hermes3:8b" "Hermes 3 8B" -Alias "hermes3:medium-reasoning" -Roles $ReasoningRoles -MinVramMb 6000
+}
+
+if ($ENABLE_PHI4_MINI_REASONING_3P8B -eq 1) {
+    Pull-Model "phi4-mini-reasoning:3.8b" "Phi4 Mini Reasoning 3.8B" -Alias "phi4:small-reasoning" -Roles $ReasoningRoles
+}
+
+if ($ENABLE_PHI4_REASONING_14B -eq 1) {
+    Pull-Model "phi4-reasoning:14b" "Phi4 Reasoning 14B" -Alias "phi4:large-reasoning" -Roles $ReasoningRoles -MinVramMb 6000
+}
+
+if ($ENABLE_MOONDREAM_1P8B -eq 1) {
+    Pull-Model "moondream:1.8b" "Moondream 1.8B" -Alias "moondream:small-vision" -Roles $VisionRoles
+}
+
+if ($ENABLE_QWEN25VL_7B -eq 1) {
+    Pull-Model "qwen2.5vl:7b" "Qwen 2.5 VL 7B" -Alias "qwen25vl:medium-vision" -Roles $VisionRoles -MinVramMb 6000
 }
 
 if ($ChatModelsRequested -gt 0 -and $ChatModelsPulled -eq 0) {
@@ -440,20 +530,26 @@ if (-not (Wait-ForWebUI 90)) {
 # --------------------------------------------------
 # Configure non-tool-capable models to skip native function calling
 # --------------------------------------------------
-# DeepSeek Coder and Gemma 3 don't support Ollama's tool-calling capability at all, but Open
-# WebUI defaults every model to attempt native tool calls whenever a builtin tool (Code
-# Interpreter, Sub-agents, etc.) is enabled for the request - Ollama then rejects every
-# message for these models with "does not support tools". Setting each one's Function
-# Calling param to "legacy" here (equivalent to Workspace -> Models -> Edit -> Function
-# Calling -> Legacy in the UI) makes Open WebUI fall back to prompt-based tool use instead,
-# which these models do support. Non-fatal and silently skipped if WEBUI_AUTH has been
-# turned back on, since the blank-password sign-in this relies on only works with auth off.
+# DeepSeek Coder, Gemma 3, Phi (reasoning), and both vision models don't support Ollama's
+# tool-calling capability at all, but Open WebUI defaults every model to attempt native
+# tool calls whenever a builtin tool (Code Interpreter, Sub-agents, etc.) is enabled for
+# the request - Ollama then rejects every message for these models with "does not support
+# tools". Setting each one's Function Calling param to "legacy" here (equivalent to
+# Workspace -> Models -> Edit -> Function Calling -> Legacy in the UI) makes Open WebUI
+# fall back to prompt-based tool use instead, which these models do support. Non-fatal and
+# silently skipped if WEBUI_AUTH has been turned back on, since the blank-password sign-in
+# this relies on only works with auth off. IDs use the alias tags written above, since the
+# raw tags stop existing once `ollama rm` runs.
 $NonToolCapableModels = @(
-    @{ id = "deepseek-coder:1.3b"; name = "DeepSeek Coder 1.3B" },
-    @{ id = "deepseek-coder:6.7b"; name = "DeepSeek Coder 6.7B" },
-    @{ id = "deepseek-coder:33b";  name = "DeepSeek Coder 33B" },
-    @{ id = "gemma3:2b";           name = "Gemma 3 2B" },
-    @{ id = "gemma3:7b";           name = "Gemma 3 7B" }
+    @{ id = "deepseek-coder:small-coding";  name = "DeepSeek Coder 1.3B" },
+    @{ id = "deepseek-coder:medium-coding"; name = "DeepSeek Coder 6.7B" },
+    @{ id = "deepseek-coder:xlarge-coding"; name = "DeepSeek Coder 33B" },
+    @{ id = "gemma3:small-general";         name = "Gemma 3 1B" },
+    @{ id = "gemma3:medium-general";        name = "Gemma 3 4B" },
+    @{ id = "phi4:small-reasoning";         name = "Phi4 Mini Reasoning 3.8B" },
+    @{ id = "phi4:large-reasoning";         name = "Phi4 Reasoning 14B" },
+    @{ id = "moondream:small-vision";       name = "Moondream 1.8B" },
+    @{ id = "qwen25vl:medium-vision";       name = "Qwen 2.5 VL 7B" }
 )
 try {
     $SignIn = Invoke-RestMethod -Uri "http://localhost:3000/api/v1/auths/signin" -Method Post `
@@ -482,7 +578,7 @@ try {
         }
     }
 } catch {
-    Write-Host "NOTE: Could not auto-configure DeepSeek Coder / Gemma 3 for tool compatibility (Open WebUI auth may be enabled). See README's Troubleshooting section to do it manually."
+    Write-Host "NOTE: Could not auto-configure DeepSeek Coder / Gemma 3 / Phi / Moondream / Qwen 2.5 VL for tool compatibility (Open WebUI auth may be enabled). See README's Troubleshooting section to do it manually."
 }
 
 # --------------------------------------------------
@@ -494,22 +590,36 @@ $ContinueConfig = Join-Path $ContinueDir "config.yaml"
 
 New-Item -ItemType Directory -Force $ContinueDir | Out-Null
 
-@"
-name: OffgridDev
-version: 0.0.1
-schema: v1
-models:
-  - name: OffgridDev Autodetect
-    provider: ollama
-    model: AUTODETECT
-    apiBase: http://localhost:11434
-    roles:
-      - chat
-      - edit
-      - apply
-      - rerank
-      - autocomplete
-"@ | Set-Content -Path $ContinueConfig -Encoding utf8
+# One explicit named entry per model that actually pulled-and-aliased this run (friendly
+# name, alias tag, and its task-appropriate role set), plus AUTODETECT kept as a trailing
+# catch-all - that still picks up anything pulled out-of-band via Open WebUI's manual-pull
+# UI, which never goes through the alias step above.
+$ContinueConfigLines = @(
+    "name: OffgridDev",
+    "version: 0.0.1",
+    "schema: v1",
+    "models:"
+)
+foreach ($ModelEntry in $script:PulledModelEntries) {
+    $ContinueConfigLines += "  - name: $($ModelEntry.name)"
+    $ContinueConfigLines += "    provider: ollama"
+    $ContinueConfigLines += "    model: $($ModelEntry.model)"
+    $ContinueConfigLines += "    apiBase: http://localhost:11434"
+    $ContinueConfigLines += "    roles:"
+    foreach ($Role in $ModelEntry.roles) {
+        $ContinueConfigLines += "      - $Role"
+    }
+}
+$ContinueConfigLines += "  - name: OffgridDev Autodetect"
+$ContinueConfigLines += "    provider: ollama"
+$ContinueConfigLines += "    model: AUTODETECT"
+$ContinueConfigLines += "    apiBase: http://localhost:11434"
+$ContinueConfigLines += "    roles:"
+foreach ($Role in @("chat", "edit", "apply", "rerank", "autocomplete")) {
+    $ContinueConfigLines += "      - $Role"
+}
+
+$ContinueConfigLines | Set-Content -Path $ContinueConfig -Encoding utf8
 
 Write-Host "Continue config written to:"
 Write-Host $ContinueConfig

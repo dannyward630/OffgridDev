@@ -4,8 +4,9 @@ troubleshooting.md
 Author(s): Gabriel Mongefranco
 Created: 2026-08-06
 Last Modified: 2026-08-06
-Summary: Documents known failure modes and their fixes for the OffgridDev stack,
-  referenced from the README's Documentation section.
+Summary: Documents known failure modes and their fixes for the OffgridDev stack, including
+  stale model aliases and chat history migration, referenced from the README's
+  Documentation section.
 Notes: See README file for documentation and full license information.
 
 Copyright © 2026 The Regents of the University of Michigan
@@ -40,41 +41,69 @@ To check whether a container is currently healthy:
 docker inspect --format "{{.State.Health.Status}}" offgriddev-webui
 ```
 
-## A model fails to pull
-If a single enabled model can't be pulled — a registry hiccup, a full disk, a tag that's been retired — the
-startup scripts print a `WARNING:` for that model and move on to the rest of the list rather than aborting
-the whole run. The final "Active models" list (printed once the script finishes) only shows models that
-actually pulled; anything that failed is called out separately underneath it, e.g.:
+## A model fails to pull, or doesn't fit your VRAM
+If a single enabled model can't be pulled — a registry hiccup, a full disk, a tag that's been retired, or the
+model is simply bigger than your detected GPU VRAM can cover — the startup scripts print a `WARNING:` for
+that model and move on to the rest of the list rather than aborting the whole run. A VRAM-too-small skip
+looks like:
+```
+WARNING: Skipping DeepSeek-R1 14B (deepseek-r1:14b) - needs ~10 GB VRAM, this GPU has 6144 MB. Not pulling
+it. Disable its ENABLE_* flag in models.env to silence this warning.
+```
+The final "Active models" list (printed once the script finishes) only shows models that actually pulled;
+anything that failed or was skipped for VRAM is called out separately underneath it, e.g.:
 ```
 Active models:
   - Qwen 2.5 Coder 7B
 
 Failed to pull (not available in Web UI or Continue - see warnings above):
-  - Gemma 3 7B
+  - Gemma 3 4B
+  - DeepSeek-R1 14B
 ```
-The run only stops outright with an `ERROR:` if **every** enabled chat model failed to pull — at that point
-there's nothing to chat with, so continuing wouldn't leave you with a usable stack. Scroll back through the
-warnings to see why each failure happened, fix that (usually network, disk space, or an outdated tag), and
-re-run the startup script — it's safe to run repeatedly.
+The run only stops outright with an `ERROR:` if **every** enabled chat model failed to pull or didn't fit —
+at that point there's nothing to chat with, so continuing wouldn't leave you with a usable stack. Scroll back
+through the warnings to see why each one happened (usually network, disk space, an outdated tag, or VRAM),
+fix what you can, and re-run the startup script — it's safe to run repeatedly.
+
+## Stale model aliases after disabling a model
+Disabling a model in `config/models.env` (setting its `ENABLE_*` flag back to `0`) only stops the startup
+scripts from pulling it on the *next* run — it does **not** remove the alias tag (e.g.
+`qwen25-coder:medium-coding`) a previous run already created in Ollama. The model stays fully usable in Open
+WebUI and Continue until you remove it yourself:
+```
+docker exec offgriddev-ollama ollama rm qwen25-coder:medium-coding
+```
+This is safe to run any time — it only removes that one tag; blobs shared with any other alias you still
+have pulled are untouched. Run `docker exec offgriddev-ollama ollama list` first if you're not sure of the
+exact alias tag to remove.
+
+## Old chat history referencing a raw model tag
+Pre-existing Open WebUI chat history created before this project switched to aliased model names may still
+reference the old raw tag (e.g. `deepseek-coder:6.7b` instead of `deepseek-coder:medium-coding`). Those
+messages continue to display normally — Open WebUI stores the model ID as plain text alongside each message
+— but **"regenerate" on one of them will fail** once the raw tag no longer exists in Ollama (see
+[Model Naming](hardware-and-model-configuration.md#model-naming) for why the raw tag goes away). Start a new
+chat with the model's current alias name instead; there's no supported way to retarget old messages at the
+new tag.
 
 ## Tools errors on DeepSeek Coder / Gemma 3
 ```
-registry.ollama.ai/library/deepseek-coder:6.7b does not support tools
+registry.ollama.ai/library/deepseek-coder:medium-coding does not support tools
 ```
 This is Ollama's own error, not Open WebUI's — it means a request reached Ollama with a `tools` definition
-attached, and the model's template has no way to use one. DeepSeek Coder and Gemma 3 never support Ollama
-tool calling, at any size (confirmed against each model's capability tags on ollama.com/library) — this
-isn't specific to Sub-agents. Open WebUI defaults every model to attempt **native** (tool-based) function
-calling the moment *any* builtin tool is enabled for a request, and **Code Interpreter is enabled by
-default** in stock Open WebUI, independent of the
-[Sub-agents](installation-and-usage.md#sub-agents) setting.
+attached, and the model's template has no way to use one. DeepSeek Coder, Gemma 3, Phi (`phi4-mini-reasoning`,
+`phi4-reasoning`), and both vision models (Moondream, Qwen2.5-VL) never support Ollama tool calling, at any
+size (confirmed against each model's capability tags on ollama.com/library) — this isn't specific to
+Sub-agents. Open WebUI defaults every model to attempt **native** (tool-based) function calling the moment
+*any* builtin tool is enabled for a request, and **Code Interpreter is enabled by default** in stock Open
+WebUI, independent of the [Sub-agents](installation-and-usage.md#sub-agents) setting.
 
-The startup scripts handle this automatically: after Web UI comes up, they configure DeepSeek Coder and
-Gemma 3 (all sizes used by this project) with Function Calling forced to **Legacy** via Open WebUI's Models
-API — the one setting that, per Open WebUI's own source, unconditionally skips native tool injection for a
-model, regardless of which builtin tool triggered it. This step is non-fatal and silently skipped if you've
-turned `WEBUI_AUTH` back on (it signs in as the default admin using a blank password, which only works with
-auth disabled).
+The startup scripts handle this automatically: after Web UI comes up, they configure all of the models above
+(all sizes used by this project) with Function Calling forced to **Legacy** via Open WebUI's Models API — the
+one setting that, per Open WebUI's own source, unconditionally skips native tool injection for a model,
+regardless of which builtin tool triggered it. This step is non-fatal and silently skipped if you've turned
+`WEBUI_AUTH` back on (it signs in as the default admin using a blank password, which only works with auth
+disabled).
 
 **If you still see this error after re-running the startup script:** check it manually — open
 **Workspace → Models**, edit the model in question, and confirm **Function Calling** reads **Legacy** (not
@@ -121,9 +150,20 @@ warning naming the required driver version if it happens; you can also check by 
 docker inspect --format "{{.State.Health.Status}} " offgriddev-ollama
 docker exec offgriddev-ollama ollama ps
 ```
-The `PROCESSOR` column in `ollama ps` reads `100% GPU` when it's working and `100% CPU` when it isn't (only
-shows currently-loaded models — run a chat first if the list is empty). If it says CPU and you have an
-NVIDIA GPU, update your driver from [nvidia.com/drivers](https://www.nvidia.com/drivers) (search your exact
+`ollama ps` only lists currently-loaded models, so send a chat message first — ideally run the command while
+the model is still actively generating a reply, since the container may unload the model (dropping it from
+this list entirely) shortly after the reply finishes, depending on its keep-alive setting. The `PROCESSOR`
+column reads `100% GPU` when a model fits entirely in VRAM, `100% CPU` when the driver/GPU isn't being used
+at all, or a split like `64%/36% CPU/GPU` when the model is larger than available VRAM and Ollama offloaded
+only part of it — e.g.:
+```
+NAME                            ID              SIZE      PROCESSOR          CONTEXT    UNTIL
+deepseek-coder:medium-coding    ce298d984115    6.1 GB    64%/36% CPU/GPU    4096       4 minutes from now
+```
+A split like this is expected, not a bug, whenever a model's loaded size (weights + KV cache for the active
+context) exceeds your GPU's VRAM — see [Hardware & Model Configuration](hardware-and-model-configuration.md)
+for which models fit which VRAM tiers. If it says **100% CPU** and you have an NVIDIA GPU, that's the driver
+issue above: update your driver from [nvidia.com/drivers](https://www.nvidia.com/drivers) (search your exact
 GPU model), then re-run the startup script. On a University-managed laptop, driver updates may require your
 department's IT support if you don't have local admin rights.
 

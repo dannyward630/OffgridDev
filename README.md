@@ -29,7 +29,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>.
 ## Description
 **OffgridDev**™ is a local, offline-first AI development environment for developers and researchers who want serious AI assistance **without the cloud, tokens, or subscriptions**.
 
-Built as an open-source, air-gapped stack, OffgridDev™ orchestrates Docker, Ollama, and Continue for VS Code to keep sensitive codebases, research scripts, and algorithms strictly on your local machine. The stack auto-detects your GPU and available VRAM to match open-weight models to your exact hardware limits while blocking choices your system can't run. Out of the box, it ships with curated, VRAM-tiered defaults across four supported model families: Qwen (2.5 Coder and Qwen3 Coder), DeepSeek Coder, Gemma (3 and 4), and Devstral.
+Built as an open-source, air-gapped stack, OffgridDev™ orchestrates Docker, Ollama, and Continue for VS Code to keep sensitive codebases, research scripts, and algorithms strictly on your local machine. The stack auto-detects your GPU and available VRAM to match open-weight models to your exact hardware limits while blocking choices your system can't run. Out of the box, it ships with curated, VRAM-tiered defaults across coding, reasoning, general-purpose, and vision model families — Qwen (2.5 Coder, Qwen3 Coder, Qwen3), DeepSeek (Coder and R1), Gemma (3 and 4), Devstral, QwQ, Hermes 3, Phi, and Moondream/Qwen2.5-VL — each pulled under a consistent, friendly name shared across Open WebUI, VS Code's Continue extension, and FieldStationAI.
 
 
 ## Quick Start Guide
