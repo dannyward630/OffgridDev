@@ -33,7 +33,7 @@ Built as an open-source, air-gapped stack, OffgridDev™ orchestrates Docker, Ol
 
 
 ## Quick Start Guide
-1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop) and make sure it's running.
+1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop) and make sure it's running. Note: this may require administrator or super user rights.
 2. Download this repo and extract it to `C:\OffgridDev` (Windows) or `~/offgriddev` (macOS/Linux).
 3. Optionally edit `config/models.env` to choose which models to pull — sane defaults are already set.
 4. Start the stack:
